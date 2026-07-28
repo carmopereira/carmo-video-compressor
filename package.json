@@ -1,0 +1,28 @@
+{
+	"name": "carmo-video-compressor",
+	"version": "1.0.1",
+	"description": "WordPress plugin that compresses uploaded videos on the server with a fixed ffmpeg pipeline.",
+	"main": "index.js",
+	"scripts": {
+		"start": "wp-scripts start",
+		"build": "wp-scripts build",
+		"prebuild": "npm version patch --no-git-tag-version && node scripts/sync-version.js",
+		"updateGIT": "node scripts/update-git.js",
+		"symlink": "node scripts/create-symlink.js",
+		"plugin-zip": "wp-scripts plugin-zip"
+	},
+	"keywords": [
+		"wordpress",
+		"ffmpeg",
+		"video"
+	],
+	"author": "carmopereira",
+	"license": "GPL-2.0-or-later",
+	"type": "commonjs",
+	"devDependencies": {
+		"@wordpress/scripts": "^33.0.0"
+	},
+	"browserslist": [
+		"extends @wordpress/browserslist-config"
+	]
+}
