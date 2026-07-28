@@ -1,66 +1,66 @@
 # Carmo Video Compressor
 
-Plugin WordPress que comprime vídeos diretamente no servidor, usando um pipeline `ffmpeg` fixo:
+WordPress plugin that compresses videos directly on the server, using a fixed `ffmpeg` pipeline:
 
 ```
 ffmpeg -i input.mp4 -an -vcodec libx264 -crf 28 -preset slow -pix_fmt yuv420p output.mp4
 ```
 
-Uma página de admin em **Ferramentas → Video Compressor** permite arrastar (ou escolher) um vídeo, iniciar a compressão, acompanhar o progresso do upload e da compressão, e depois fazer download ou apagar o resultado numa tabela.
+An admin page under **Tools → Video Compressor** lets you drag-and-drop (or choose) a video, start the compression, track upload and compression progress, and then download or delete the result in a table.
 
-## Funcionalidades
+## Features
 
-- Drag-and-drop ou browse para selecionar o vídeo original.
-- Compressão assíncrona em background (não bloqueia o pedido PHP nem trava com `max_execution_time`).
-- Barra de progresso do upload e da compressão (via `ffprobe`/`ffmpeg -progress`).
-- CPU throttling automático: `nice -n 19` + `-threads` limitado a metade dos cores do servidor (quando disponíveis), sem alterar os parâmetros de codificação pedidos.
-- O ficheiro original nunca é guardado — é apagado assim que a compressão termina (com sucesso ou erro).
-- Tabela de vídeos comprimidos com download e apagar.
-- Um job de cada vez (sem fila de múltiplos uploads em simultâneo).
-- Acesso restrito a administradores (`manage_options`).
+- Drag-and-drop or browse to select the original video.
+- Asynchronous background compression (doesn't block the PHP request or hit `max_execution_time`).
+- Upload and compression progress bar (via `ffprobe`/`ffmpeg -progress`).
+- Automatic CPU throttling: `nice -n 19` + `-threads` limited to half the server's cores (when available), without changing the requested encoding parameters.
+- The original file is never kept — it's deleted as soon as compression finishes (whether it succeeds or fails).
+- Table of compressed videos with download and delete actions.
+- One job at a time (no queue for multiple simultaneous uploads).
+- Access restricted to administrators (`manage_options`).
 
-## Requisitos
+## Requirements
 
-- WordPress com suporte a REST API (padrão).
-- `ffmpeg` e `ffprobe` instalados no servidor e acessíveis ao processo PHP.
-- Node.js + npm apenas para desenvolvimento/build dos assets (não é necessário no servidor de produção — o `build/` já vai versionado).
+- WordPress with REST API support (default).
+- `ffmpeg` and `ffprobe` installed on the server and accessible to the PHP process.
+- Node.js + npm only for developing/building the assets (not required on the production server — `build/` is already versioned).
 
-## Instalação do plugin
+## Installing the plugin
 
-1. Copiar (ou fazer symlink de) esta pasta para `wp-content/plugins/carmo-video-compressor`.
-2. Ativar o plugin em **Plugins**.
-3. Aceder a **Ferramentas → Video Compressor**.
+1. Copy (or symlink) this folder into `wp-content/plugins/carmo-video-compressor`.
+2. Activate the plugin in **Plugins**.
+3. Go to **Tools → Video Compressor**.
 
-## Instalação do ffmpeg numa VPS Ubuntu
+## Installing ffmpeg on an Ubuntu VPS
 
-O `ffmpeg` tem de estar instalado e acessível ao PHP (não basta estar instalado apenas no teu computador — em ambientes locais como o Local by WP Engine o PHP pode correr isolado do resto do sistema).
+`ffmpeg` must be installed and accessible to PHP (it's not enough for it to be installed only on your own computer — in local environments like Local by WP Engine, PHP may run isolated from the rest of the system).
 
-### 1. Instalar via apt (mais simples)
+### 1. Install via apt (simplest)
 
 ```bash
 sudo apt update
 sudo apt install -y ffmpeg
 ```
 
-Confirma a instalação e a versão:
+Confirm the installation and version:
 
 ```bash
 ffmpeg -version
 ffprobe -version
 ```
 
-O `apt` do Ubuntu costuma trazer uma versão um pouco mais antiga do ffmpeg, mas é suficiente para este pipeline (`libx264` + `yuv420p` são suportados por qualquer build recente).
+Ubuntu's `apt` usually ships a slightly older version of ffmpeg, but it's enough for this pipeline (`libx264` + `yuv420p` are supported by any recent build).
 
-### 2. Confirmar que o PHP consegue encontrar o binário
+### 2. Confirm that PHP can find the binary
 
-O PHP-FPM/Apache corre com o seu próprio `PATH`, que pode não ser o mesmo do teu utilizador SSH. Confirma o caminho absoluto:
+PHP-FPM/Apache runs with its own `PATH`, which may not be the same as your SSH user's. Confirm the absolute path:
 
 ```bash
 which ffmpeg
 which ffprobe
 ```
 
-Normalmente devolve `/usr/bin/ffmpeg` e `/usr/bin/ffprobe` numa instalação via apt. O plugin já tenta resolver os binários automaticamente (`PATH`, depois localizações comuns como `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`), mas se o teu servidor tiver uma configuração atípica (ex: `open_basedir`, PHP-FPM com `PATH` muito restrito, ou ffmpeg instalado num caminho fora do comum), define os caminhos explicitamente no `wp-config.php`:
+This usually returns `/usr/bin/ffmpeg` and `/usr/bin/ffprobe` on an apt install. The plugin already tries to resolve the binaries automatically (`PATH`, then common locations like `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`), but if your server has an atypical setup (e.g. `open_basedir`, PHP-FPM with a very restricted `PATH`, or ffmpeg installed in an unusual path), define the paths explicitly in `wp-config.php`:
 
 ```php
 define('CVC_FFMPEG_BIN', '/usr/bin/ffmpeg');
@@ -68,19 +68,19 @@ define('CVC_FFPROBE_BIN', '/usr/bin/ffprobe');
 define('CVC_NICE_BIN', '/usr/bin/nice');
 ```
 
-### 3. Confirmar que `shell_exec` não está bloqueado
+### 3. Confirm that `shell_exec` isn't blocked
 
-Alguns hosts desativam funções de execução de shell por segurança. Confirma que `shell_exec` não está na lista de `disable_functions` do `php.ini`:
+Some hosts disable shell execution functions for security reasons. Confirm that `shell_exec` isn't in the `disable_functions` list in `php.ini`:
 
 ```bash
 php -i | grep disable_functions
 ```
 
-Se `shell_exec` aparecer nessa lista, o plugin não vai conseguir correr o ffmpeg — é preciso removê-lo da lista (em `php.ini`, ou na configuração do pool PHP-FPM do site) e reiniciar o PHP-FPM.
+If `shell_exec` shows up in that list, the plugin won't be able to run ffmpeg — it needs to be removed from the list (in `php.ini`, or in the site's PHP-FPM pool configuration) and PHP-FPM restarted.
 
-### 4. (Opcional) Compilar o ffmpeg com mais otimizações
+### 4. (Optional) Build ffmpeg with more optimizations
 
-Para a maioria dos casos o pacote do `apt` chega. Se precisares de uma versão mais recente/otimizada, os builds estáticos oficiais são uma alternativa sem precisar de compilar:
+For most cases, the `apt` package is enough. If you need a newer/more optimized version, the official static builds are an alternative that doesn't require compiling:
 
 ```bash
 cd /opt
@@ -90,22 +90,22 @@ sudo ln -s /opt/ffmpeg-*-amd64-static/ffmpeg /usr/local/bin/ffmpeg
 sudo ln -s /opt/ffmpeg-*-amd64-static/ffprobe /usr/local/bin/ffprobe
 ```
 
-E depois define `CVC_FFMPEG_BIN`/`CVC_FFPROBE_BIN` no `wp-config.php` a apontar para `/usr/local/bin/ffmpeg` e `/usr/local/bin/ffprobe`, se o PHP não os encontrar automaticamente.
+Then define `CVC_FFMPEG_BIN`/`CVC_FFPROBE_BIN` in `wp-config.php` pointing to `/usr/local/bin/ffmpeg` and `/usr/local/bin/ffprobe`, if PHP doesn't find them automatically.
 
-## Desenvolvimento
+## Development
 
 ```bash
 npm install
 npm run start   # watch mode
-npm run build   # build de produção (gera build/index.js, build/index.css, build/index.asset.php)
+npm run build   # production build (generates build/index.js, build/index.css, build/index.asset.php)
 ```
 
-Scripts auxiliares:
+Helper scripts:
 
-- `npm run symlink` — cria um symlink desta pasta dentro de `wp-content/plugins` de um site WordPress local.
-- `npm run updateGIT` — commit + push interativo.
-- `npm run plugin-zip` — gera um `.zip` do plugin pronto a distribuir.
+- `npm run symlink` — creates a symlink of this folder inside `wp-content/plugins` of a local WordPress site.
+- `npm run updateGIT` — interactive commit + push.
+- `npm run plugin-zip` — generates a distributable plugin `.zip`.
 
-## Licença
+## License
 
 GPL-2.0-or-later
