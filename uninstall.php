@@ -15,8 +15,9 @@ $base_dir   = trailingslashit($upload_dir['basedir']) . 'carmo-video-compressor'
 
 if (is_dir($base_dir)) {
     require_once ABSPATH . 'wp-admin/includes/file.php';
-    WP_Filesystem();
     global $wp_filesystem;
 
-    $wp_filesystem->delete($base_dir, true, 'd');
+    if (WP_Filesystem() && $wp_filesystem) {
+        $wp_filesystem->delete($base_dir, true, 'd');
+    }
 }

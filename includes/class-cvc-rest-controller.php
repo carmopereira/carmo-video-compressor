@@ -70,6 +70,25 @@ class CVC_Rest_Controller
 
     public function create_job(WP_REST_Request $request)
     {
+        try {
+            return $this->do_create_job($request);
+        } catch (\Throwable $e) {
+            error_log(sprintf('[carmo-video-compressor] create_job failed: %s in %s:%d', $e->getMessage(), $e->getFile(), $e->getLine()));
+
+            return new WP_Error(
+                'cvc_upload_error',
+                sprintf(
+                    /* translators: %s: real error message, only shown to administrators. */
+                    __('Ocorreu um erro ao enviar o ficheiro: %s', 'carmo-video-compressor'),
+                    $e->getMessage()
+                ),
+                ['status' => 500]
+            );
+        }
+    }
+
+    private function do_create_job(WP_REST_Request $request)
+    {
         if ($this->repo->find_active()) {
             return new WP_Error('cvc_job_active', __('Já existe uma compressão em curso. Aguarde que termine.', 'carmo-video-compressor'), ['status' => 409]);
         }
@@ -115,8 +134,13 @@ class CVC_Rest_Controller
         }
 
         require_once ABSPATH . 'wp-admin/includes/file.php';
-        WP_Filesystem();
         global $wp_filesystem;
+
+        if (!WP_Filesystem() || !$wp_filesystem) {
+            $this->repo->delete($job_id);
+
+            return new WP_Error('cvc_filesystem_unavailable', __('Não foi possível aceder ao sistema de ficheiros do servidor (acesso direto indisponível).', 'carmo-video-compressor'), ['status' => 500]);
+        }
 
         if (!$wp_filesystem->move($file['tmp_name'], $input_path)) {
             $this->repo->delete($job_id);
@@ -238,8 +262,11 @@ class CVC_Rest_Controller
     private function tail_file(string $path, int $bytes): string
     {
         require_once ABSPATH . 'wp-admin/includes/file.php';
-        WP_Filesystem();
         global $wp_filesystem;
+
+        if (!WP_Filesystem() || !$wp_filesystem) {
+            return '';
+        }
 
         $content = $wp_filesystem->get_contents($path);
         if ($content === false) {

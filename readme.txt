@@ -4,7 +4,7 @@ Tags: video, compression, ffmpeg, media, upload
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 1.0.6
+Stable tag: 1.0.7
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -52,7 +52,16 @@ No. `ffmpeg` and `ffprobe` must be installed on the server and accessible to the
 
 No, the plugin processes one job at a time by design.
 
+= I get a "413 Payload Too Large" error when uploading a video =
+
+This is a limit enforced by the web server itself (not by WordPress or this plugin), so it has to be raised at the server level. On OpenLiteSpeed, raise "Max Request Body Size" at both the server and virtual host level, and raise `upload_max_filesize`/`post_max_size` in the `lsphp` `php.ini`. See README.md for step-by-step instructions.
+
 == Changelog ==
+
+= 1.0.7 =
+* Surface real upload errors to administrators instead of a generic message.
+* Fix a fatal error when WP_Filesystem direct access is unavailable.
+* Document how to raise upload size limits on OpenLiteSpeed.
 
 = 1.0.4 =
 * Use cached, prepared queries for the custom jobs table.

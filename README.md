@@ -92,6 +92,32 @@ sudo ln -s /opt/ffmpeg-*-amd64-static/ffprobe /usr/local/bin/ffprobe
 
 Then define `CVC_FFMPEG_BIN`/`CVC_FFPROBE_BIN` in `wp-config.php` pointing to `/usr/local/bin/ffmpeg` and `/usr/local/bin/ffprobe`, if PHP doesn't find them automatically.
 
+## Increasing the upload size limit (OpenLiteSpeed)
+
+Video files are usually much bigger than the default upload limits. If the browser shows `413 Payload Too Large` (or the network tab shows a `413` response) when starting a compression, the request is being rejected by the web server itself, before it ever reaches WordPress/PHP — no plugin setting can work around this, it has to be raised at the server level.
+
+### 1. Raise the limit in OpenLiteSpeed
+
+1. Open the WebAdmin Console (usually `https://your-server-ip:7080`).
+2. Go to **Configuration → Server → Tuning** and check **Max Request Body Size (bytes)**. This is the hard ceiling for the whole server.
+3. Go to **Virtual Hosts → (your site) → General**, and set **Max Request Body Size (bytes)** to the size you want to allow (e.g. `2147483648` for 2 GB). This value cannot exceed the server-level ceiling from step 2.
+4. If you manage the server through CyberPanel, the equivalent option is usually under **Websites → List Websites → Manage → vHost Conf**, editing the same `maxReqBodySize` directive directly.
+5. Save and restart/graceful-restart OpenLiteSpeed for the change to apply:
+   ```bash
+   sudo systemctl restart lsws
+   ```
+
+### 2. Raise the PHP limits too
+
+OpenLiteSpeed still runs PHP through `lsphp`, which has its own `upload_max_filesize` and `post_max_size` limits. Find the `php.ini` used by `lsphp` (commonly under `/usr/local/lsws/lsphpXX/etc/php.ini`) and set:
+
+```ini
+upload_max_filesize = 2048M
+post_max_size = 2048M
+```
+
+Then restart `lsws` again so `lsphp` picks up the new `php.ini`. If only the OpenLiteSpeed limit is raised and the PHP one is left low, uploads will still fail, just with a different error instead of `413`.
+
 ## Development
 
 ```bash
