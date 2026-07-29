@@ -8,6 +8,8 @@ require('./index.scss');
 	const NONCE = settings.nonce;
 
 	const POLL_INTERVAL_MS = 1500;
+	const CHUNK_SIZE = 50 * 1024 * 1024;
+	const CHUNK_RETRY_ATTEMPTS = 3;
 
 	let selectedFile = null;
 	let pollTimer = null;
@@ -116,60 +118,120 @@ require('./index.scss');
 		showError('');
 		setControlsDisabled(true);
 
+		const file = selectedFile;
 		const uploadProgress = document.querySelector('.cvc-progress--upload');
 		const uploadBar = uploadProgress.querySelector('.cvc-progress__bar');
 		uploadProgress.hidden = false;
+		uploadBar.classList.remove('is-indeterminate');
 		uploadBar.style.width = '0%';
 
-		const formData = new FormData();
-		formData.append('video', selectedFile);
+		const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
 
-		const xhr = new XMLHttpRequest();
-		xhr.open('POST', REST_URL + 'jobs');
-		xhr.setRequestHeader('X-WP-Nonce', NONCE);
-
-		xhr.upload.addEventListener('progress', (e) => {
-			if (e.lengthComputable) {
-				const percent = Math.round((e.loaded / e.total) * 100);
-				uploadBar.classList.remove('is-indeterminate');
-				uploadBar.style.width = percent + '%';
-			}
-		});
-
-		// The browser can finish handing off the bytes before the server has
-		// actually finished receiving/saving the file (proxies, slow disk, etc.),
-		// so there can be a real gap here with no more upload events. Switch to
-		// an indeterminate state instead of leaving the bar looking stuck at 100%.
-		xhr.upload.addEventListener('load', () => {
-			uploadProgress.querySelector('.cvc-progress__label').textContent = 'A processar o envio no servidor…';
-			uploadBar.classList.add('is-indeterminate');
-		});
-
-		xhr.addEventListener('load', () => {
-			uploadProgress.hidden = true;
-
-			let response = {};
-			try {
-				response = JSON.parse(xhr.responseText);
-			} catch (e) {
-				response = {};
-			}
-
-			if (xhr.status >= 200 && xhr.status < 300) {
+		initUpload(file, totalChunks)
+			.then((jobId) => uploadChunks(jobId, file, totalChunks, uploadBar))
+			.then((response) => {
+				uploadProgress.hidden = true;
 				beginPolling(response.id);
-			} else {
-				showError(response.message || 'Ocorreu um erro ao enviar o ficheiro.');
+			})
+			.catch((err) => {
+				uploadProgress.hidden = true;
+				showError(err.message || 'Ocorreu um erro ao enviar o ficheiro.');
 				resetForm();
+			});
+	}
+
+	function initUpload(file, totalChunks) {
+		return fetch(REST_URL + 'jobs/init', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'X-WP-Nonce': NONCE,
+			},
+			body: JSON.stringify({
+				filename: file.name,
+				total_size: file.size,
+				total_chunks: totalChunks,
+			}),
+		}).then((r) =>
+			r.json().then((data) => {
+				if (!r.ok) {
+					throw new Error(data.message || 'Não foi possível iniciar o envio.');
+				}
+				return data.id;
+			})
+		);
+	}
+
+	// Uploads chunks one at a time (not in parallel): the server appends each
+	// chunk to the end of the file being reconstructed, in order, so chunks
+	// must arrive and be acknowledged strictly sequentially.
+	function uploadChunks(jobId, file, totalChunks, uploadBar) {
+		let index = 0;
+
+		const uploadNext = () => {
+			const start = index * CHUNK_SIZE;
+			const end = Math.min(start + CHUNK_SIZE, file.size);
+			const chunk = file.slice(start, end);
+
+			return uploadChunkWithRetry(jobId, index, chunk, CHUNK_RETRY_ATTEMPTS, (loaded) => {
+				const overall = (start + loaded) / file.size;
+				uploadBar.style.width = Math.round(overall * 100) + '%';
+			}).then((response) => {
+				index += 1;
+				return index >= totalChunks ? response : uploadNext();
+			});
+		};
+
+		return uploadNext();
+	}
+
+	function uploadChunkWithRetry(jobId, index, chunk, attemptsLeft, onProgress) {
+		return uploadChunk(jobId, index, chunk, onProgress).catch((err) => {
+			if (attemptsLeft <= 1) {
+				throw err;
 			}
+			return uploadChunkWithRetry(jobId, index, chunk, attemptsLeft - 1, onProgress);
 		});
+	}
 
-		xhr.addEventListener('error', () => {
-			uploadProgress.hidden = true;
-			showError('Ocorreu um erro de rede ao enviar o ficheiro.');
-			resetForm();
+	function uploadChunk(jobId, index, chunk, onProgress) {
+		return new Promise((resolve, reject) => {
+			const formData = new FormData();
+			formData.append('index', String(index));
+			formData.append('chunk', chunk);
+
+			const xhr = new XMLHttpRequest();
+			xhr.open('POST', REST_URL + 'jobs/' + jobId + '/chunk');
+			xhr.setRequestHeader('X-WP-Nonce', NONCE);
+
+			xhr.upload.addEventListener('progress', (e) => {
+				if (e.lengthComputable) {
+					onProgress(e.loaded);
+				}
+			});
+
+			xhr.addEventListener('load', () => {
+				let response = {};
+				try {
+					response = JSON.parse(xhr.responseText);
+				} catch (e) {
+					response = {};
+				}
+
+				if (xhr.status >= 200 && xhr.status < 300) {
+					onProgress(chunk.size);
+					resolve(response);
+				} else {
+					reject(new Error(response.message || 'Ocorreu um erro ao enviar o ficheiro.'));
+				}
+			});
+
+			xhr.addEventListener('error', () => {
+				reject(new Error('Ocorreu um erro de rede ao enviar o ficheiro.'));
+			});
+
+			xhr.send(formData);
 		});
-
-		xhr.send(formData);
 	}
 
 	function resetForm() {

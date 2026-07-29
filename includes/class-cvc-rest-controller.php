@@ -24,16 +24,21 @@ class CVC_Rest_Controller
     public function register_routes(): void
     {
         register_rest_route(self::NAMESPACE, '/jobs', [
-            [
-                'methods'             => WP_REST_Server::CREATABLE,
-                'callback'            => [$this, 'create_job'],
-                'permission_callback' => [$this, 'check_permission'],
-            ],
-            [
-                'methods'             => WP_REST_Server::READABLE,
-                'callback'            => [$this, 'list_jobs'],
-                'permission_callback' => [$this, 'check_permission'],
-            ],
+            'methods'             => WP_REST_Server::READABLE,
+            'callback'            => [$this, 'list_jobs'],
+            'permission_callback' => [$this, 'check_permission'],
+        ]);
+
+        register_rest_route(self::NAMESPACE, '/jobs/init', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [$this, 'init_upload'],
+            'permission_callback' => [$this, 'check_permission'],
+        ]);
+
+        register_rest_route(self::NAMESPACE, '/jobs/(?P<id>\d+)/chunk', [
+            'methods'             => WP_REST_Server::CREATABLE,
+            'callback'            => [$this, 'upload_chunk'],
+            'permission_callback' => [$this, 'check_permission'],
         ]);
 
         register_rest_route(self::NAMESPACE, '/jobs/(?P<id>\d+)/status', [
@@ -68,44 +73,43 @@ class CVC_Rest_Controller
         'webm' => 'video/webm',
     ];
 
-    public function create_job(WP_REST_Request $request)
+    /** Chunks are uploaded client-side at ~50MB; this is a server-side sanity ceiling, not the target size. */
+    private const MAX_CHUNK_BYTES = 200 * 1024 * 1024;
+
+    /** An "uploading" job with no chunk activity for this long is considered abandoned and freed up. */
+    private const UPLOAD_STALE_MINUTES = 15;
+
+    /**
+     * Starts a new chunked upload: creates the job row and the metadata
+     * sidecar file that tracks how many chunks have been received so far.
+     */
+    public function init_upload(WP_REST_Request $request)
     {
         try {
-            return $this->do_create_job($request);
+            return $this->do_init_upload($request);
         } catch (\Throwable $e) {
-            error_log(sprintf('[carmo-video-compressor] create_job failed: %s in %s:%d', $e->getMessage(), $e->getFile(), $e->getLine()));
-
-            return new WP_Error(
-                'cvc_upload_error',
-                sprintf(
-                    /* translators: %s: real error message, only shown to administrators. */
-                    __('Ocorreu um erro ao enviar o ficheiro: %s', 'carmo-video-compressor'),
-                    $e->getMessage()
-                ),
-                ['status' => 500]
-            );
+            return $this->upload_error_response('init_upload', $e);
         }
     }
 
-    private function do_create_job(WP_REST_Request $request)
+    private function do_init_upload(WP_REST_Request $request)
     {
+        $this->reconcile_stale_uploads();
+
         if ($this->repo->find_active()) {
             return new WP_Error('cvc_job_active', __('Já existe uma compressão em curso. Aguarde que termine.', 'carmo-video-compressor'), ['status' => 409]);
         }
 
-        $files = $request->get_file_params();
-        if (empty($files['video']) || !isset($files['video']['tmp_name'])) {
-            return new WP_Error('cvc_no_file', __('Nenhum ficheiro de vídeo foi enviado.', 'carmo-video-compressor'), ['status' => 400]);
+        $filename     = sanitize_file_name((string) $request->get_param('filename'));
+        $total_size   = (int) $request->get_param('total_size');
+        $total_chunks = (int) $request->get_param('total_chunks');
+
+        if ($filename === '' || $total_size <= 0 || $total_chunks <= 0) {
+            return new WP_Error('cvc_invalid_upload', __('Dados de upload inválidos.', 'carmo-video-compressor'), ['status' => 400]);
         }
 
-        $file = $files['video'];
-
-        if (!empty($file['error'])) {
-            return new WP_Error('cvc_upload_error', __('Ocorreu um erro no envio do ficheiro.', 'carmo-video-compressor'), ['status' => 400]);
-        }
-
-        $filetype = wp_check_filetype_and_ext($file['tmp_name'], $file['name'], self::ALLOWED_TYPES);
-        if (empty($filetype['ext']) || !isset(self::ALLOWED_TYPES[$filetype['ext']])) {
+        $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+        if (!isset(self::ALLOWED_TYPES[$ext])) {
             return new WP_Error('cvc_invalid_type', __('Tipo de ficheiro não suportado. Use mp4, mov, mkv, avi ou webm.', 'carmo-video-compressor'), ['status' => 400]);
         }
 
@@ -113,49 +117,172 @@ class CVC_Rest_Controller
         $tmp_dir = trailingslashit($base) . 'tmp';
         wp_mkdir_p($tmp_dir);
 
-        $original_filename = sanitize_file_name($file['name']);
-        $ext               = $filetype['ext'];
-
         $job_id = $this->repo->create([
-            'original_filename' => $original_filename,
+            'original_filename' => $filename,
             'status'            => 'uploading',
         ]);
 
-        $input_path    = trailingslashit($tmp_dir) . $job_id . '-input.' . $ext;
-        $progress_path = trailingslashit($tmp_dir) . $job_id . '-progress.txt';
-        $log_path      = trailingslashit($tmp_dir) . $job_id . '-ffmpeg.log';
-        $done_path     = trailingslashit($tmp_dir) . $job_id . '-done';
-        $output_path   = trailingslashit($base) . 'compressed/' . $job_id . '-' . pathinfo($original_filename, PATHINFO_FILENAME) . '.mp4';
+        $this->write_upload_meta($job_id, [
+            'ext'          => $ext,
+            'total_size'   => $total_size,
+            'total_chunks' => $total_chunks,
+            'received'     => 0,
+        ]);
 
-        if (!is_uploaded_file($file['tmp_name'])) {
+        return new WP_REST_Response(['id' => $job_id], 201);
+    }
+
+    /**
+     * Receives one chunk, appends it to the file being reconstructed on
+     * disk, and, once every chunk has arrived, kicks off the compression
+     * job exactly like the old single-request upload used to.
+     */
+    public function upload_chunk(WP_REST_Request $request)
+    {
+        try {
+            return $this->do_upload_chunk($request);
+        } catch (\Throwable $e) {
+            return $this->upload_error_response('upload_chunk', $e);
+        }
+    }
+
+    private function do_upload_chunk(WP_REST_Request $request)
+    {
+        $job_id = (int) $request->get_param('id');
+        $job    = $this->repo->find($job_id);
+
+        if (!$job || $job['status'] !== 'uploading') {
+            return new WP_Error('cvc_not_found', __('Job não encontrado ou já não aceita mais dados.', 'carmo-video-compressor'), ['status' => 404]);
+        }
+
+        $meta = $this->read_upload_meta($job_id);
+        if (!$meta) {
+            return new WP_Error('cvc_not_found', __('Sessão de upload não encontrada.', 'carmo-video-compressor'), ['status' => 404]);
+        }
+
+        $files = $request->get_file_params();
+        if (empty($files['chunk']) || !isset($files['chunk']['tmp_name']) || !is_uploaded_file($files['chunk']['tmp_name'])) {
+            return new WP_Error('cvc_no_file', __('Pedaço de ficheiro em falta.', 'carmo-video-compressor'), ['status' => 400]);
+        }
+
+        $index = (int) $request->get_param('index');
+        if ($index < 0 || $index >= $meta['total_chunks']) {
+            return new WP_Error('cvc_invalid_chunk', __('Índice de pedaço inválido.', 'carmo-video-compressor'), ['status' => 400]);
+        }
+
+        $chunk_path = $files['chunk']['tmp_name'];
+        if (filesize($chunk_path) > self::MAX_CHUNK_BYTES) {
+            return new WP_Error('cvc_chunk_too_large', __('Pedaço de ficheiro demasiado grande.', 'carmo-video-compressor'), ['status' => 413]);
+        }
+
+        $base      = cvc_upload_base_dir();
+        $tmp_dir   = trailingslashit($base) . 'tmp';
+        $part_path = trailingslashit($tmp_dir) . $job_id . '-input.' . $meta['ext'] . '.part';
+
+        // Chunk already applied (client retried after a lost response): acknowledge without re-appending.
+        if ($index < $meta['received']) {
+            return new WP_REST_Response(['received' => $meta['received'], 'total' => $meta['total_chunks']], 200);
+        }
+
+        if ($index > $meta['received']) {
+            return new WP_Error('cvc_out_of_order', __('Pedaços de ficheiro fora de ordem.', 'carmo-video-compressor'), ['status' => 409]);
+        }
+
+        $this->append_chunk($part_path, $chunk_path);
+
+        $meta['received']++;
+        $this->write_upload_meta($job_id, $meta);
+
+        $this->repo->update($job_id, [
+            'progress_percent' => (int) round(($meta['received'] / $meta['total_chunks']) * 100),
+        ]);
+
+        if ($meta['received'] < $meta['total_chunks']) {
+            return new WP_REST_Response(['received' => $meta['received'], 'total' => $meta['total_chunks']], 200);
+        }
+
+        return $this->finalize_upload($job_id, $job, $meta, $part_path);
+    }
+
+    /**
+     * Streams the newly received chunk onto the end of the file being
+     * reconstructed. WP_Filesystem has no append mode, and reading the
+     * whole (potentially multi-GB) file back into memory on every chunk
+     * would not scale, so this uses direct, streamed filesystem calls
+     * on purpose (same trade-off already accepted for readfile() on the
+     * download endpoint).
+     */
+    private function append_chunk(string $part_path, string $chunk_tmp_path): void
+    {
+        $out = fopen($part_path, 'ab');
+        if ($out === false) {
+            throw new \RuntimeException('Não foi possível abrir o ficheiro de destino.');
+        }
+
+        $in = fopen($chunk_tmp_path, 'rb');
+        if ($in === false) {
+            fclose($out);
+            throw new \RuntimeException('Não foi possível ler o pedaço enviado.');
+        }
+
+        stream_copy_to_stream($in, $out);
+
+        fclose($in);
+        fclose($out);
+    }
+
+    /**
+     * @param array<string, mixed> $job
+     * @param array<string, mixed> $meta
+     */
+    private function finalize_upload(int $job_id, array $job, array $meta, string $part_path)
+    {
+        $base    = cvc_upload_base_dir();
+        $tmp_dir = trailingslashit($base) . 'tmp';
+
+        if (!file_exists($part_path) || filesize($part_path) !== $meta['total_size']) {
+            $this->cleanup_upload($job_id, $part_path);
             $this->repo->delete($job_id);
 
-            return new WP_Error('cvc_move_failed', __('Não foi possível guardar o ficheiro enviado.', 'carmo-video-compressor'), ['status' => 500]);
+            return new WP_Error('cvc_upload_incomplete', __('O upload terminou incompleto. Tenta novamente.', 'carmo-video-compressor'), ['status' => 400]);
         }
+
+        $input_path = trailingslashit($tmp_dir) . $job_id . '-input.' . $meta['ext'];
 
         require_once ABSPATH . 'wp-admin/includes/file.php';
         global $wp_filesystem;
 
-        if (!WP_Filesystem() || !$wp_filesystem) {
-            $this->repo->delete($job_id);
-
-            return new WP_Error('cvc_filesystem_unavailable', __('Não foi possível aceder ao sistema de ficheiros do servidor (acesso direto indisponível).', 'carmo-video-compressor'), ['status' => 500]);
-        }
-
-        if (!$wp_filesystem->move($file['tmp_name'], $input_path)) {
+        if (!WP_Filesystem() || !$wp_filesystem || !$wp_filesystem->move($part_path, $input_path, true)) {
+            $this->cleanup_upload($job_id, $part_path);
             $this->repo->delete($job_id);
 
             return new WP_Error('cvc_move_failed', __('Não foi possível guardar o ficheiro enviado.', 'carmo-video-compressor'), ['status' => 500]);
         }
 
+        $filetype = wp_check_filetype_and_ext($input_path, $job['original_filename'], self::ALLOWED_TYPES);
+        if (empty($filetype['ext']) || !isset(self::ALLOWED_TYPES[$filetype['ext']])) {
+            wp_delete_file($input_path);
+            $this->delete_upload_meta($job_id);
+            $this->repo->delete($job_id);
+
+            return new WP_Error('cvc_invalid_type', __('Tipo de ficheiro não suportado. Use mp4, mov, mkv, avi ou webm.', 'carmo-video-compressor'), ['status' => 400]);
+        }
+
+        $this->delete_upload_meta($job_id);
+
+        $progress_path = trailingslashit($tmp_dir) . $job_id . '-progress.txt';
+        $log_path      = trailingslashit($tmp_dir) . $job_id . '-ffmpeg.log';
+        $done_path     = trailingslashit($tmp_dir) . $job_id . '-done';
+        $output_path   = trailingslashit($base) . 'compressed/' . $job_id . '-' . pathinfo($job['original_filename'], PATHINFO_FILENAME) . '.mp4';
+
         wp_mkdir_p(trailingslashit($base) . 'compressed');
 
         $duration = $this->compressor->probe_duration($input_path);
-
-        $pid = $this->compressor->start($input_path, $output_path, $progress_path, $log_path, $done_path);
+        $pid      = $this->compressor->start($input_path, $output_path, $progress_path, $log_path, $done_path);
 
         $this->repo->update($job_id, [
             'status'           => 'processing',
+            'progress_percent' => 0,
             'duration_seconds' => $duration,
             'pid'              => $pid,
             'progress_file'    => $progress_path,
@@ -165,6 +292,99 @@ class CVC_Rest_Controller
         ]);
 
         return new WP_REST_Response(['id' => $job_id, 'status' => 'processing'], 201);
+    }
+
+    private function upload_error_response(string $context, \Throwable $e): WP_Error
+    {
+        error_log(sprintf('[carmo-video-compressor] %s failed: %s in %s:%d', $context, $e->getMessage(), $e->getFile(), $e->getLine()));
+
+        return new WP_Error(
+            'cvc_upload_error',
+            sprintf(
+                /* translators: %s: real error message, only shown to administrators. */
+                __('Ocorreu um erro ao enviar o ficheiro: %s', 'carmo-video-compressor'),
+                $e->getMessage()
+            ),
+            ['status' => 500]
+        );
+    }
+
+    /**
+     * If a chunked upload is abandoned (tab closed, network gone for good),
+     * the job would otherwise sit in "uploading" forever and permanently
+     * block find_active(). Anything with no chunk activity for a while is
+     * treated as failed and cleaned up so a new upload can start.
+     */
+    private function reconcile_stale_uploads(): void
+    {
+        $job = $this->repo->find_active();
+        if (!$job || $job['status'] !== 'uploading') {
+            return;
+        }
+
+        $updated_at = strtotime((string) $job['updated_at']);
+        if ($updated_at !== false && $updated_at > time() - self::UPLOAD_STALE_MINUTES * MINUTE_IN_SECONDS) {
+            return;
+        }
+
+        $job_id = (int) $job['id'];
+        $meta   = $this->read_upload_meta($job_id);
+
+        if ($meta) {
+            $base      = cvc_upload_base_dir();
+            $tmp_dir   = trailingslashit($base) . 'tmp';
+            $part_path = trailingslashit($tmp_dir) . $job_id . '-input.' . $meta['ext'] . '.part';
+            $this->cleanup_upload($job_id, $part_path);
+        }
+
+        $this->repo->delete($job_id);
+    }
+
+    private function cleanup_upload(int $job_id, string $part_path): void
+    {
+        if (file_exists($part_path)) {
+            wp_delete_file($part_path);
+        }
+
+        $this->delete_upload_meta($job_id);
+    }
+
+    private function upload_meta_path(int $job_id): string
+    {
+        $base = cvc_upload_base_dir();
+
+        return trailingslashit($base) . 'tmp/' . $job_id . '-upload.json';
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function read_upload_meta(int $job_id): ?array
+    {
+        $path = $this->upload_meta_path($job_id);
+        if (!file_exists($path)) {
+            return null;
+        }
+
+        $data = json_decode((string) file_get_contents($path), true);
+
+        return is_array($data) ? $data : null;
+    }
+
+    /**
+     * @param array<string, mixed> $meta
+     */
+    private function write_upload_meta(int $job_id, array $meta): void
+    {
+        file_put_contents($this->upload_meta_path($job_id), wp_json_encode($meta));
+    }
+
+    private function delete_upload_meta(int $job_id): void
+    {
+        $path = $this->upload_meta_path($job_id);
+        if (file_exists($path)) {
+            wp_delete_file($path);
+        }
     }
 
     public function list_jobs(): WP_REST_Response
