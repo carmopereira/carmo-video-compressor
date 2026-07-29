@@ -82,9 +82,9 @@ class CVC_Compressor
      *
      * @return array{percent: ?int, finished: bool}
      */
-    public function read_progress(string $progress_path, ?float $duration): array
+    public function read_progress(?string $progress_path, ?float $duration): array
     {
-        if (!file_exists($progress_path)) {
+        if ($progress_path === null || !file_exists($progress_path)) {
             return ['percent' => $duration !== null ? 0 : null, 'finished' => false];
         }
 

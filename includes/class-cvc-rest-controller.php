@@ -108,7 +108,17 @@ class CVC_Rest_Controller
         $done_path     = trailingslashit($tmp_dir) . $job_id . '-done';
         $output_path   = trailingslashit($base) . 'compressed/' . $job_id . '-' . pathinfo($original_filename, PATHINFO_FILENAME) . '.mp4';
 
-        if (!move_uploaded_file($file['tmp_name'], $input_path)) {
+        if (!is_uploaded_file($file['tmp_name'])) {
+            $this->repo->delete($job_id);
+
+            return new WP_Error('cvc_move_failed', __('Não foi possível guardar o ficheiro enviado.', 'carmo-video-compressor'), ['status' => 500]);
+        }
+
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        WP_Filesystem();
+        global $wp_filesystem;
+
+        if (!$wp_filesystem->move($file['tmp_name'], $input_path)) {
             $this->repo->delete($job_id);
 
             return new WP_Error('cvc_move_failed', __('Não foi possível guardar o ficheiro enviado.', 'carmo-video-compressor'), ['status' => 500]);
@@ -166,9 +176,22 @@ class CVC_Rest_Controller
     {
         $id = (int) $job['id'];
 
+        if (empty($job['done_file'])) {
+            // The job never got its worker files recorded (e.g. the process
+            // failed to launch at all). There's nothing to poll for, so fail
+            // it outright instead of looping forever.
+            $error = __('A compressão não foi iniciada corretamente.', 'carmo-video-compressor');
+            $this->repo->update($id, ['status' => 'error', 'error_message' => $error]);
+            $job['status']        = 'error';
+            $job['error_message'] = $error;
+            $this->cleanup_job_scratch_files($job);
+
+            return $job;
+        }
+
         if (!file_exists($job['done_file'])) {
             $duration = $job['duration_seconds'] !== null ? (float) $job['duration_seconds'] : null;
-            $progress = $this->compressor->read_progress($job['progress_file'], $duration);
+            $progress = $this->compressor->read_progress($job['progress_file'] ?: null, $duration);
 
             if ($progress['percent'] !== null && $progress['percent'] !== (int) $job['progress_percent']) {
                 $this->repo->update($id, ['progress_percent' => $progress['percent']]);
@@ -191,12 +214,12 @@ class CVC_Rest_Controller
             $job['status']            = 'done';
             $job['progress_percent']  = 100;
         } else {
-            $log = file_exists($job['log_file'])
+            $log = !empty($job['log_file']) && file_exists($job['log_file'])
                 ? $this->tail_file($job['log_file'], 4000)
                 : __('Sem detalhes do erro.', 'carmo-video-compressor');
 
             if (file_exists($output_path)) {
-                unlink($output_path);
+                wp_delete_file($output_path);
             }
 
             $this->repo->update($id, [
@@ -214,16 +237,18 @@ class CVC_Rest_Controller
 
     private function tail_file(string $path, int $bytes): string
     {
-        $size = filesize($path);
-        $fh   = fopen($path, 'r');
-        if ($fh === false) {
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        WP_Filesystem();
+        global $wp_filesystem;
+
+        $content = $wp_filesystem->get_contents($path);
+        if ($content === false) {
             return '';
         }
 
-        $offset = max(0, $size - $bytes);
-        fseek($fh, $offset);
-        $content = (string) fread($fh, $size - $offset);
-        fclose($fh);
+        if (strlen($content) > $bytes) {
+            $content = substr($content, -$bytes);
+        }
 
         return trim($content);
     }
@@ -238,7 +263,7 @@ class CVC_Rest_Controller
         $id      = (int) $job['id'];
 
         foreach (glob(trailingslashit($tmp_dir) . $id . '-*') ?: [] as $scratch_file) {
-            unlink($scratch_file);
+            wp_delete_file($scratch_file);
         }
     }
 
@@ -285,7 +310,7 @@ class CVC_Rest_Controller
             $base        = cvc_upload_base_dir();
             $output_path = trailingslashit($base) . 'compressed/' . $job['output_filename'];
             if (file_exists($output_path)) {
-                unlink($output_path);
+                wp_delete_file($output_path);
             }
         }
 

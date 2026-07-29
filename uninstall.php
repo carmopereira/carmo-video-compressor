@@ -15,33 +15,8 @@ $base_dir   = trailingslashit($upload_dir['basedir']) . 'carmo-video-compressor'
 
 if (is_dir($base_dir)) {
     require_once ABSPATH . 'wp-admin/includes/file.php';
+    WP_Filesystem();
+    global $wp_filesystem;
 
-    /**
-     * Recursively delete a directory using the WP_Filesystem-independent
-     * approach (uninstall.php runs in a minimal bootstrap where direct
-     * filesystem access is the simplest, safest option here).
-     */
-    $delete_recursive = static function (string $dir) use (&$delete_recursive): void {
-        $items = scandir($dir);
-        if ($items === false) {
-            return;
-        }
-
-        foreach ($items as $item) {
-            if ($item === '.' || $item === '..') {
-                continue;
-            }
-
-            $path = trailingslashit($dir) . $item;
-            if (is_dir($path)) {
-                $delete_recursive($path);
-            } else {
-                unlink($path);
-            }
-        }
-
-        rmdir($dir);
-    };
-
-    $delete_recursive($base_dir);
+    $wp_filesystem->delete($base_dir, true, 'd');
 }

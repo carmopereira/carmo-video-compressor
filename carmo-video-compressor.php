@@ -1,12 +1,14 @@
 <?php
 /**
- * Plugin Name: carmo-video-compressor
+ * Plugin Name: Carmo Video Compressor
  * Description: Compress videos on the server with a fixed ffmpeg (libx264/CRF 28) pipeline, via a drag-and-drop admin tool under Tools.
+ * Requires at least: 6.2
+ * Requires PHP: 7.4
  * Author: carmopereira
  * Author URI: https://github.com/carmopereira
  * License: GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
- * Version:           1.0.1
+ * Version:           1.0.6
  * Text Domain: carmo-video-compressor
  */
 
