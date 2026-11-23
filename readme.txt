@@ -4,7 +4,7 @@ Tags: video, compression, ffmpeg, media, upload
 Requires at least: 6.2
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 1.0.9
+Stable tag: 1.0.10
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -58,6 +58,12 @@ This is a limit enforced by the web server itself (not by WordPress or this plug
 
 == Changelog ==
 
+= 1.0.10 =
+* Fix a fatal error on every admin page for users without the manage_options capability (editors, authors, subscribers).
+
+= 1.0.9 =
+* Upload videos in ~50MB chunks instead of a single request, avoiding server request-size limits.
+
 = 1.0.7 =
 * Surface real upload errors to administrators instead of a generic message.
 * Fix a fatal error when WP_Filesystem direct access is unavailable.
@@ -71,6 +77,9 @@ This is a limit enforced by the web server itself (not by WordPress or this plug
 * Initial public version.
 
 == Upgrade Notice ==
+
+= 1.0.10 =
+Fixes a fatal error in wp-admin for non-administrator users. Update immediately.
 
 = 1.0.4 =
 Internal hardening release, no action required.

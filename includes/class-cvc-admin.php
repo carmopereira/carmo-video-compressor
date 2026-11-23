@@ -18,7 +18,10 @@ class CVC_Admin
 
     public function register_page(): void
     {
-        $this->page_hook = add_submenu_page(
+        // add_submenu_page() returns false when the current user lacks the
+        // capability; under strict_types that would be a TypeError on the
+        // string-typed property and a fatal on every admin page for non-admins.
+        $hook = add_submenu_page(
             'tools.php',
             __('Video Compressor', 'carmo-video-compressor'),
             __('Video Compressor', 'carmo-video-compressor'),
@@ -26,6 +29,8 @@ class CVC_Admin
             'carmo-video-compressor',
             [$this, 'render_page']
         );
+
+        $this->page_hook = is_string($hook) ? $hook : '';
     }
 
     public function render_page(): void
